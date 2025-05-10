@@ -3,289 +3,402 @@ import re
 import requests
 import json
 from pathlib import Path
+from urllib.parse import quote
+from textwrap import fill
 
-# 获取脚本文件所在目录的路径
-def get_config_file_path():
-    script_dir = Path(__file__).resolve().parent  # 获取当前脚本文件的目录
-    return script_dir / "config.json"  # 修改文件名为 config.json
+# 配置文件处理
+def get_config_path():
+    return Path(__file__).resolve().parent / "config.json"
 
-# 从配置文件加载access token
 def load_config():
-    config_file = get_config_file_path()
+    config_file = get_config_path()
     if config_file.exists():
         try:
             with open(config_file, 'r', encoding='utf-8') as f:
-                config_data = json.load(f)
-                
-                # 检查读取到的数据是否为字典
-                if isinstance(config_data, dict):
-                    return config_data
-                else:
-                    print("配置文件格式错误，预计为字典类型，已重置配置。")
-                    return {}
+                config = json.load(f)
+                if isinstance(config, dict):
+                    return config
+                print("⚠️ 配置文件格式错误，已重置")
         except (json.JSONDecodeError, IOError) as e:
-            print(f"配置文件读取错误: {e}, 正在创建新的配置文件...")
+            print(f"⚠️ 配置文件读取错误: {e}")
     return {}
 
-# 保存配置到config.json
+def shorten(text, width=60, placeholder="..."):
+    """自定义缩短文本函数"""
+    if len(text) <= width:
+        return text
+    return text[:width - len(placeholder)] + placeholder
+
 def save_config(config):
-    config_file = get_config_file_path()
     try:
-        with open(config_file, 'w', encoding='utf-8') as f:
+        with open(get_config_path(), 'w', encoding='utf-8') as f:
             json.dump(config, f, ensure_ascii=False, indent=4)
     except IOError as e:
-        print(f"保存配置文件时发生错误: {e}")
+        print(f"⚠️ 保存配置失败: {e}")
 
-# 请求Bangumi API并获取数据
-def fetch_bangumi_data(anime_id, access_token):
-    """从Bangumi API获取动画和剧集数据，带有access token。"""
-    headers = {
-        'accept': 'application/json',
-        'content-type': 'application/json',
-        'Authorization': f"Bearer {access_token}",
-        'User-Agent': 'Prejudice-Studio/AutoAni-For-DownKyi (https://github.com/Prejudice-Studio/AutoAni-For-DownKyi)'
-    }
-    
-    base_url = f"https://api.bgm.tv/v0/subjects/{anime_id}"  # 获取动画的基本信息
-    episodes_url = f"https://api.bgm.tv/v0/episodes?subject_id={anime_id}"  # 获取该动画的所有剧集（章节）
+# Bangumi API 交互
+def search_bangumi(keyword, page=1):
+    """搜索番剧（支持分页）"""
+    url = f"https://api.bgm.tv/search/subject/{quote(keyword)}?type=2&responseGroup=large&start={(page-1)*10}"
+    headers = {"User-Agent": "bangumi-renamer/1.0"}
     
     try:
-        # 获取动画基础信息
-        anime_response = requests.get(base_url, headers=headers)
-        anime_response.raise_for_status()  # 如果响应码不是 2xx 会抛出异常
-        anime_data = anime_response.json()
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()
+        data = response.json()
         
-        # 获取剧集信息
-        episodes_response = requests.get(episodes_url, headers=headers)
-        episodes_response.raise_for_status()  # 如果响应码不是 2xx 会抛出异常
-        episodes_data = episodes_response.json()
+        results = data.get("list", [])
+        total = data.get("results", 0)
+        total_pages = max(1, (total + 9) // 10)
         
-        episodes = {}
+        print(f"\n🔍 搜索结果 (第{page}页/共{total_pages}页):")
+        for i, item in enumerate(results[:10], 1):
+            name = item.get('name_cn') or item.get('name', '未知')
+            print(f"\n{i}. {name} (ID: {item.get('id', '未知')})")
+            print(f"   📅 放送: {item.get('air_date', '未知')}")
+            print(f"   ⭐ 评分: {item.get('rating', {}).get('score', '无')} ({item.get('rating', {}).get('total', 0)}人评分)")
+            print(f"   📺 集数: {item.get('total_episodes', '未知')}")
+            
+            # 显示前5个标签
+            if item.get('tags'):
+                print(f"   🏷️ 标签: {', '.join(tag['name'] for tag in item['tags'][:5])}")
+            
+            # 缩短的简介（最多3行）
+            summary = item.get('summary', '无')
+            shortened = shorten(summary, width=60, placeholder="...")
+            print(f"   📖 简介: {shortened}")
+        
+        return results, total_pages
+    except Exception as e:
+        print(f"❌ 搜索失败: {e}")
+        return [], 1
 
-        # 收集剧集标题（优先中文标题，若无则使用原标题）
-        for ep in episodes_data["data"]:
-            if ep.get('type') != 0:
-                continue
-            ep_number = ep['sort']
-            episode_title = ep['name_cn'] if ep['name_cn'] != "" else ep['name']
-            episode_title = episode_title if episode_title != "" else f"第{ep_number}话"
-            episodes[ep_number] = episode_title
-        
+def fetch_bangumi_data(anime_id, access_token=None):
+    """获取番剧详细信息（完整版）"""
+    headers = {
+        "User-Agent": "bangumi-renamer/1.0",
+        "accept": "application/json"
+    }
+    if access_token:
+        headers["Authorization"] = f"Bearer {access_token}"
+    
+    try:
+        # 获取基本信息
+        subject_url = f"https://api.bgm.tv/v0/subjects/{anime_id}"
+        subject_res = requests.get(subject_url, headers=headers)
+        subject_res.raise_for_status()
+        anime_data = subject_res.json()
+
+        # 获取分集信息
+        episodes_url = f"https://api.bgm.tv/v0/episodes?subject_id={anime_id}&limit=100"
+        episodes_res = requests.get(episodes_url, headers=headers)
+        episodes_res.raise_for_status()
+        episodes_data = episodes_res.json().get("data", [])
+
+        # 旧版API备用
+        if not episodes_data:
+            episodes_url = f"https://api.bgm.tv/subject/{anime_id}/episodes"
+            episodes_res = requests.get(episodes_url, headers=headers)
+            episodes_res.raise_for_status()
+            episodes_data = episodes_res.json()
+
+        episodes = {}
+        for ep in episodes_data:
+            if isinstance(ep, dict) and ep.get("type") == 0:  # 正片
+                ep_num = ep.get("sort") or ep.get("ep")
+                if ep_num is not None:
+                    ep_name = ep.get("name_cn") or ep.get("name") or f"第{ep_num}话"
+                    episodes[int(ep_num)] = ep_name
+
+        # 获取完整标签信息
+        tags_url = f"https://api.bgm.tv/v0/subjects/{anime_id}/tags"
+        tags_res = requests.get(tags_url, headers=headers)
+        if tags_res.status_code == 200:
+            tags_data = tags_res.json()
+            anime_data['tags'] = [tag['name'] for tag in tags_data.get('data', [])]
+        else:
+            anime_data['tags'] = []
+
         return anime_data, episodes
-    except requests.RequestException as e:
-        print(f"无法获取 Bangumi 数据: {e}")
+    except Exception as e:
+        print(f"❌ 获取数据失败: {e}")
         return None, {}
 
-# 重命名文件
-def rename_files_in_directory(directory, prefix, season, episode_titles, anime_data, add_episode_title):
-    # 定义文件名匹配规则
-    pattern_full = re.compile(r"(?:.+ )?第(\d+)话 (.+)\.(\w+)")  # 匹配 "正片 第X话 abcdefg.mp4" 或 "第X话 abcdefg.mp4"
-    pattern_partial = re.compile(r"(?:.+ )?第(\d+)话\.(\w+)")  # 匹配 "正片 第X话.mp4" 或 "第X话.mp4"
+def display_anime_info(anime_data, episodes):
+    """完整显示番剧信息"""
+    print("\n" + "="*80)
+    print("🎬 番剧详细信息".center(80))
+    print("="*80)
+    
+    print(f"\n📛 中文标题: {anime_data.get('name_cn', '无')}")
+    print(f"🔠 原版标题: {anime_data.get('name', '无')}")
+    print(f"📅 放送日期: {anime_data.get('date', '未知')}")
+    print(f"⭐ 评分: {anime_data.get('rating', {}).get('score', '无')} ({anime_data.get('rating', {}).get('total', 0)}人评分)")
+    print(f"📺 总集数: {len(episodes)}")
+    print(f"🏷️ 排名: {anime_data.get('rank', '无')}")
+    
+    print("\n🏷️ 标签: ", end="")
+    if anime_data.get('tags'):
+        print(", ".join(anime_data['tags'][:15]))  # 最多显示15个标签
+        if len(anime_data['tags']) > 15:
+            print(f"  (共{len(anime_data['tags'])}个标签，显示前15个)")
+    else:
+        print("无")
+    
+    print("\n📖 完整简介:")
+    print(anime_data.get('summary', '无'))
+    
+    print("\n📺 分集列表:")
+    for num, title in sorted(episodes.items()):
+        print(f"  第{str(num).zfill(2)}话: {title}")
+    
+    print("="*80 + "\n")
 
-    # 记录用户对部分匹配的决策
-    user_decision = None
+def rename_files(directory, subgroup, prefix, season, episode_titles, use_bangumi, start_offset=0, add_titles=True, hdr_resolution=None):
+    """执行文件重命名
+    :param hdr_resolution: 用户指定的HDR视频分辨率（如1080）
+    """
+    # 增强版正则，匹配各种格式：
+    # 1. 正片 第X话 标题.编码.质量信息.ext
+    # 2. 第X话.编码.质量信息.ext
+    pattern = re.compile(
+        r".*(?:正片\s*)?(?:第(\d+)话|EP(\d+))(?:\s*(.*?))?(?:\.(AVC|HEVC|H\.264|H\.265))?(?:\.(HDR|SDR))?(?:\.(\d{3,4}P|4[Kk]|8[Kk])(?:\s*超高清)?)?(?:\s*(真彩|Hi10P|高码率|高画质))*\.([a-zA-Z0-9]+)$",
+        re.IGNORECASE
+    )
+    preview = []
+    
+    for filename in os.listdir(directory):
+        clean_name = filename.strip('\ufeff').strip()
+        match = pattern.match(clean_name)
+        if not match:
+            print(f"⏭️ 跳过: '{filename}'")
+            continue
 
-    # 准备预览列表
-    preview_changes = []
+        # 提取信息
+        original_num = int(match.group(1) or match.group(2))
+        original_title = match.group(3).strip() if match.group(3) else ""
+        codec = match.group(4)  # AVC/HEVC等
+        hdr_flag = match.group(5)  # HDR/SDR
+        resolution = match.group(6)  # 1080P/4K等
+        extra_flags = match.group(7)  # 真彩/Hi10P等
+        ext = match.group(8).lower()  # 扩展名
 
-    try:
-        # 遍历目录中的所有文件
-        for filename in os.listdir(directory):
-            try:
-                match_full = pattern_full.match(filename)
-                match_partial = pattern_partial.match(filename)
-
-                if match_full:
-                    # 提取文件名中的编号、名称和扩展名
-                    number = int(match_full.group(1))
-                    name = match_full.group(2)
-                    extension = match_full.group(3)
-
-                    # 从Bangumi获取剧集标题，如果没有则使用文件名中的名称
-                    episode_title = episode_titles.get(number, name) if add_episode_title else ""
-
-                    # 格式化新文件名，并在集数前添加零
-                    season_prefix = f"S{str(season).zfill(2)}" if season else ""
-                    if prefix and season and episode_title:
-                        new_filename = f"{prefix} {season_prefix}E{str(number).zfill(2)} {episode_title}.{extension}"
-                    elif prefix and season:
-                        new_filename = f"{prefix} {season_prefix}E{str(number).zfill(2)}.{extension}"
-                    elif prefix and episode_title:
-                        new_filename = f"{prefix} E{str(number).zfill(2)} {episode_title}.{extension}"
-                    elif prefix:
-                        new_filename = f"{prefix} E{str(number).zfill(2)}.{extension}"
-                    elif season and episode_title:
-                        new_filename = f"{season_prefix}E{str(number).zfill(2)} {episode_title}.{extension}"
-                    elif season:
-                        new_filename = f"{season_prefix}E{str(number).zfill(2)}.{extension}"
-                    else:
-                        new_filename = f"E{str(number).zfill(2)}.{extension}"
-
-                    preview_changes.append((filename, new_filename))
-
-                elif match_partial:
-                    # 提取文件名中的编号和扩展名
-                    number = int(match_partial.group(1))
-                    extension = match_partial.group(2)
-
-                    # 从Bangumi获取剧集标题，如果没有则使用默认名称
-                    episode_title = episode_titles.get(number, "") if add_episode_title else ""
-
-                    if user_decision is None:
-                        # 提示用户是否强制重命名部分匹配文件
-                        response = input(f"检测到文件 '{filename}' 只有编号，是否强制重命名？(y/n，留空默认 y): ").strip().lower() or 'y'
-                        if response == 'y':
-                            user_decision = True
-                        elif response == 'n':
-                            user_decision = False
-                        else:
-                            print("无效的输入，请输入 'y' 或 'n'。")
-                            continue
-
-                    if user_decision:
-                        season_prefix = f"S{str(season).zfill(2)}" if season else ""
-                        if episode_title == "":
-                            episode_title = f"第{number}话"
-                        if prefix and season and episode_title:
-                            new_filename = f"{prefix} {season_prefix}E{str(number).zfill(2)} {episode_title}.{extension}"
-                        elif prefix and season:
-                            new_filename = f"{prefix} {season_prefix}E{str(number).zfill(2)}.{extension}"
-                        elif prefix and episode_title:
-                            new_filename = f"{prefix} E{str(number).zfill(2)} {episode_title}.{extension}"
-                        elif prefix:
-                            new_filename = f"{prefix} E{str(number).zfill(2)}.{extension}"
-                        elif season and episode_title:
-                            new_filename = f"{season_prefix}E{str(number).zfill(2)} {episode_title}.{extension}"
-                        elif season:
-                            new_filename = f"{season_prefix}E{str(number).zfill(2)}.{extension}"
-                        else:
-                            new_filename = f"E{str(number).zfill(2)}.{extension}"
-
-                        preview_changes.append((filename, new_filename))
-                    else:
-                        print(f"跳过文件: '{filename}'")
-                else:
-                    print(f"跳过文件: '{filename}'，不符合重命名规则")
-
-            except Exception as e:
-                print(f"处理文件 '{filename}' 时发生错误: {e}")
-                continue
-
-        # 显示重命名预览并确认
-        print("以下是重命名预览:")
-        for old_name, new_name in preview_changes:
-            print(f"'{old_name}' → '{new_name}'")
-
-        confirm = input("是否确认执行重命名？(y/n，留空默认 y): ").strip().lower() or 'y'
-        if confirm == 'y':
-            for old_name, new_name in preview_changes:
-                try:
-                    old_path = os.path.join(directory, old_name)
-                    new_path = os.path.join(directory, new_name)
-                    os.rename(old_path, new_path)
-                    print(f"文件重命名: '{old_name}' → '{new_name}'")
-                except Exception as e:
-                    print(f"重命名文件 '{old_name}' 时发生错误: {e}")
-                    continue
-        elif confirm == 'n':
-            print("已取消重命名操作。")
-        else:
-            print("无效的输入，请输入 'y' 或 'n'。")
-
-    except Exception as e:
-        print(f"处理文件夹 '{directory}' 时发生错误: {e}")
-
-
-
-# 主程序
-if __name__ == "__main__":
-    config = load_config()
-
-    # 首次启动时询问填写access token
-    if not config.get('access_token'):
-        print("首次启动，您需要提供 Bangumi Access Token。")
-        while True:
-            ACCESS_TOKEN = input("请输入 Bangumi 动画的 Access Token: ").strip()
-            if ACCESS_TOKEN:
-                config['access_token'] = ACCESS_TOKEN
-                break
+        # 计算集数
+        episode_num = original_num + (start_offset - 1) if start_offset > 0 else original_num
+        
+        # 确定标题
+        final_title = ""
+        if add_titles:
+            if use_bangumi and episode_titles:
+                final_title = episode_titles.get(original_num, original_title)
             else:
-                print("Access Token 不能为空！")
-        save_config(config)
+                final_title = original_title
+        
+        # 处理分辨率逻辑
+        resolution_parts = []
+        if hdr_flag and hdr_resolution:  # 如果是HDR视频且用户指定了分辨率
+            resolution_parts.append(f"{hdr_resolution}P")
+        elif resolution:  # 其他情况使用检测到的分辨率
+            resolution = resolution.upper()
+            if resolution == '4K':
+                resolution = '2160P'
+            elif resolution == '8K':
+                resolution = '4320P'
+            resolution_parts.append(resolution)
+        
+        # 构建质量信息部分
+        quality_parts = []
+        if codec:
+            quality_parts.append(codec.upper())
+        if resolution_parts:
+            quality_parts.extend(resolution_parts)
+        
+        hdr_detected = bool(hdr_flag) or (extra_flags and "真彩" in extra_flags)
+        if hdr_detected:
+            quality_parts.append("HDR")
+        
+        quality_suffix = "." + ".".join(quality_parts) if quality_parts else ""
+        
+        # 构建新文件名
+        parts = []
+        if subgroup:
+            parts.append(f"[{subgroup}]")
+        if prefix:
+            parts.append(prefix)
+        parts.append(f"S{str(season).zfill(2)}E{str(episode_num).zfill(2)}" if season else f"E{str(episode_num).zfill(2)}")
+        if final_title.strip():
+            parts.append(final_title.strip())
+        
+        new_name = " ".join(parts) + quality_suffix + f".{ext}"
+        preview.append((filename, new_name))
 
-    # 开始执行重命名操作
+    if not preview:
+        print("❌ 没有可重命名的文件")
+        return False
+
+    print("\n📢 重命名预览:")
+    for old, new in preview:
+        print(f"🔄 '{old}' → '{new}'")
+
+    confirm = input("\n✅ 确认执行？(Y/n, 默认Y): ").strip().lower()
+    if confirm not in ('', 'y', 'yes'):
+        print("❌ 已取消")
+        return False
+
+    for old, new in preview:
+        try:
+            os.rename(
+                os.path.join(directory, old),
+                os.path.join(directory, new))
+            print(f"✅ 已重命名: '{old}' → '{new}'")
+        except Exception as e:
+            print(f"❌ 失败: {e}")
+    
+    return True
+
+def main():
+    print("🎬 Bangumi 番剧文件重命名工具 v4.5".center(80, '='))
+    print("="*80 + "\n")
+    config = load_config()
+    
+    # 检查Access Token
+    if not config.get("access_token"):
+        print("ℹ️ 未配置Access Token，部分功能可能受限")
+        print("ℹ️ 可在 https://next.bgm.tv/demo/access-token 申请")
+        if input("是否现在配置？(Y/n): ").strip().lower() in ('', 'y', 'yes'):
+            token = input("请输入Access Token: ").strip()
+            if token:
+                config["access_token"] = token
+                save_config(config)
+                print("✅ Token已保存")
+    
     while True:
         try:
-            folder_path = input("请输入包含要重命名文件的文件夹路径（或输入 'exit' 退出程序）：").strip()
-            if folder_path.lower() == 'exit':
-                print("程序已退出。")
+            # 获取文件夹路径
+            path = input("\n📂 输入文件夹路径（输入exit退出）: ").strip()
+            if path.lower() == 'exit':
                 break
-            if not os.path.isdir(folder_path):
-                print("指定的文件夹路径无效，请重新输入。")
+            if not os.path.isdir(path):
+                print("❌ 目录无效")
                 continue
 
-            use_bangumi = input("是否使用 Bangumi 获取剧集标题？(y/n，留空默认 y): ").strip().lower() or 'y'
+            # 所有确认步骤默认Y
+            use_bangumi = input("🌐 使用Bangumi数据？(Y/n): ").strip().lower() in ('', 'y', 'yes')
+            anime_data = None
+            episode_titles = {}
             
-            if use_bangumi == 'y':
-                bangumi_id = input("请输入 Bangumi 动画 ID（用于获取剧集标题）：").strip()
-                if not bangumi_id.isdigit():
-                    print("无效的 Bangumi 动画 ID，请重试。")
-                    continue
-
-                # 获取 Bangumi 数据
-                anime_data, episode_titles = fetch_bangumi_data(bangumi_id, config['access_token'])
-
-                if anime_data is None:
-                    print("未能获取到动画信息，已取消操作。")
-                    continue
-
-                if anime_data:
-                    anime_title = anime_data.get('name_cn') or anime_data.get('name', '未知')
-                    print(f"动画标题: {anime_title}")
-                    print(f"简介: {anime_data.get('summary', '无详细信息')}\n")
-                    print("剧集信息:")
-                    for sort, title in episode_titles.items():
-                        print(f"第{sort}集: {title}")
-
-                    # 询问是否将动画标题作为前缀
-                    use_title_as_prefix = input("是否使用动画标题作为重命名前缀？(y/n，留空默认 y): ").strip().lower() or 'y'
-                    if use_title_as_prefix == 'y':
-                        prefix = anime_title
-                    else:
-                        prefix = input("请输入重命名文件名前缀（可留空，留空默认无前缀）：").strip()
+            if use_bangumi:
+                page = 1
+                while True:
+                    query = input("\n🔍 输入番剧名/ID/n下一页/p上一页: ").strip()
+                    
+                    if query.lower() == 'n':
+                        page += 1
+                    elif query.lower() == 'p':
+                        page = max(1, page-1)
+                    elif query.isdigit():
+                        anime_data, episode_titles = fetch_bangumi_data(query, config.get("access_token"))
+                        if anime_data:
+                            display_anime_info(anime_data, episode_titles)
+                            if input("\n✅ 使用此信息？(Y/n): ").strip().lower() in ('', 'y', 'yes'):
+                                prefix = anime_data.get('name_cn') or anime_data.get('name')
+                                break
+                        print("❌ 未找到该ID的番剧")
+                        continue
+                    
+                    results, total_pages = search_bangumi(query if query not in ('n', 'p') else "", page)
+                    if not results:
+                        print("❌ 无结果")
+                        continue
+                        
+                    choice = input("选择编号(1-10)/n下一页/p上一页: ").strip().lower()
+                    
+                    if choice.isdigit() and 1 <= int(choice) <= len(results):
+                        selected = results[int(choice)-1]
+                        anime_data, episode_titles = fetch_bangumi_data(selected["id"], config.get("access_token"))
+                        if anime_data:
+                            display_anime_info(anime_data, episode_titles)
+                            if input("\n✅ 使用此信息？(Y/n): ").strip().lower() in ('', 'y', 'yes'):
+                                prefix = anime_data.get('name_cn') or anime_data.get('name')
+                                break
+                    elif choice == 'n':
+                        page = min(page+1, total_pages)
+                    elif choice == 'p':
+                        page = max(1, page-1)
+                
+                if not anime_data:
+                    print("❌ 无法获取番剧信息")
+                    use_bangumi = False
+                    prefix = input("\n🏷 输入文件名前缀: ").strip()
                 else:
-                    print("未能获取到动画信息，已取消操作。")
-                    continue
+                    if input(f"\n🏷 使用'{prefix}'作为前缀？(Y/n): ").strip().lower() in ('', 'y', 'yes'):
+                        pass
+                    else:
+                        prefix = input("请输入前缀: ").strip()
             else:
-                print("跳过获取剧集标题。")
-                episode_titles = {}
-                anime_data = None
-                prefix = input("请输入重命名文件名前缀（可留空，留空默认无前缀）：").strip()
-
-            add_season = input("是否在集数前添加季数？(y/n，留空默认添加): ").strip().lower() or 'y'
-            if add_season == 'y':
-                try:
-                    season = int(input("请输入季数（例如 1 表示第 1 季）：").strip())
-                except ValueError:
-                    print("无效的季数输入，请输入一个整数。")
-                    continue
+                prefix = input("\n🏷 输入文件名前缀: ").strip()
+            
+            # 获取其他参数
+            subgroup = input("🔖 输入SubGroup(如VCB): ").strip()
+            
+            # 添加标题选项
+            add_titles = input("📝 是否添加集标题？(Y/n): ").strip().lower() in ('', 'y', 'yes')
+            
+            # 添加季数（默认Y）
+            season = None
+            if input("\n📺 添加季数？(Y/n): ").strip().lower() in ('', 'y', 'yes'):
+                while True:
+                    try:
+                        season = int(input("🔢 输入季数(如1): ").strip())
+                        break
+                    except ValueError:
+                        print("❌ 请输入数字")
+                        
+            # 新增：HDR分辨率设置
+            hdr_resolution = None
+            if input("\n🎬 是否包含HDR视频？(y/N): ").strip().lower() in ('y', 'yes'):
+                while True:
+                    try:
+                        hdr_resolution = input("请输入HDR视频的分辨率(如1080/2160): ").strip()
+                        if not hdr_resolution.isdigit():
+                            print("❌ 请输入数字")
+                            continue
+                        break
+                    except ValueError:
+                        print("❌ 请输入有效数字")
+            
+            # 起始集数偏移（默认N）
+            start_offset = 0
+            if input("\n🔢 是否设置起始集数偏移？(y/N): ").strip().lower() in ('y', 'yes'):
+                while True:
+                    try:
+                        start_offset = int(input("请输入起始集数(如13表示E01→E13): ").strip())
+                        if start_offset < 1:
+                            print("❌ 请输入≥1的数字")
+                            continue
+                        break
+                    except ValueError:
+                        print("❌ 请输入有效数字")
+            
+            # 执行重命名（默认Y）
+            if input("\n✅ 确认执行重命名？(Y/n): ").strip().lower() in ('', 'y', 'yes'):
+                success = rename_files(
+                    path, subgroup, prefix, season, 
+                    episode_titles, use_bangumi, 
+                    start_offset, add_titles, hdr_resolution
+                )
+                
+                if success:
+                    print("\n" + "🎉 操作成功！".center(80, '=') + "\n")
+                else:
+                    print("\n" + "⚠️ 操作未完成".center(80, '=') + "\n")
             else:
-                season = None
-
-            # 询问是否要添加章节标题
-            add_episode_title = input("是否在文件名中添加章节标题？(y/n，留空默认 y): ").strip().lower() or 'y'
-            if add_episode_title == 'y':
-                add_episode_title = True
-            else:
-                add_episode_title = False
-
-            # 处理文件重命名
-            if anime_data is None:
-                print("跳过 Bangumi 标题的使用。")
-                rename_files_in_directory(folder_path, prefix, season, episode_titles, None, add_episode_title)
-            else:
-                rename_files_in_directory(folder_path, prefix, season, episode_titles, anime_data, add_episode_title)
-            print("重命名处理完成")
+                print("\n❌ 已取消重命名")
+                
+        except KeyboardInterrupt:
+            print("\n⏹️ 操作中断")
         except Exception as e:
-            print(f"程序执行过程中发生错误: {e}")
-            continue
+            print(f"❌ 发生错误: {e}")
+
+if __name__ == "__main__":
+    main()
