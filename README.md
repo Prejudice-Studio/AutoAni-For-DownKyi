@@ -1,6 +1,6 @@
 # AutoAni-For-DownKyi
 一个简单的小工具
-2025-6-15更新: 支持 [AcFUnDown](https://github.com/nICEnnnnnnnLee/AcFunDown)
+2025-6-15更新: 支持 [AcFunDown](https://github.com/nICEnnnnnnnLee/AcFunDown)
 
 # 使用注意
 - 需要安装Python3
